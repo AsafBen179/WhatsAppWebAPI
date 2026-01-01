@@ -1,0 +1,1025 @@
+openapi: 3.0.3
+info:
+  title: WhatsApp API Server
+  description: |
+    REST API for WhatsApp automation using whatsapp-web.js with PM2 support.
+    
+    ## Quick Start (Hebrew)
+    1. בדוק בריאות: GET /api/health
+    2. התחבר לוואטסאפ: POST /api/connect  
+    3. קבל QR: GET /api/qr
+    4. שלח הודעה: POST /api/send
+    
+    ## Authentication
+    Use the `x-api-key` header or `apiKey` query parameter for authentication.
+    
+  version: 1.0.0
+  contact:
+    name: AsafBen
+    email: asaf@example.com
+  license:
+    name: MIT
+    
+servers:
+  - url: http://localhost:3000
+    description: Development server
+    
+security:
+  - ApiKeyAuth: []
+  
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: x-api-key
+      description: API key for authentication
+      
+  schemas:
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          description: Success message
+        hebrew:
+          type: object
+          properties:
+            message:
+              type: string
+              description: Message in Hebrew
+              
+    ErrorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: string
+          description: Error message
+        hebrew:
+          type: object
+          properties:
+            error:
+              type: string
+              description: Error message in Hebrew
+              
+    WhatsAppStatus:
+      type: object
+      properties:
+        isReady:
+          type: boolean
+          description: Whether WhatsApp client is ready
+        connectionStatus:
+          type: string
+          description: Current connection status
+          enum: [not_initialized, connecting, connected, authenticated, ready, disconnected]
+        qrCode:
+          type: string
+          nullable: true
+          description: QR code for authentication (if available)
+        clientInfo:
+          type: object
+          nullable: true
+          properties:
+            number:
+              type: string
+              description: WhatsApp number
+            name:
+              type: string
+              description: Profile name
+              
+    SendMessageRequest:
+      type: object
+      required:
+        - phoneNumber
+        - message
+      properties:
+        phoneNumber:
+          type: string
+          description: Phone number without country code
+          example: "0501234567"
+        message:
+          type: string
+          description: Message text to send
+          example: "שלום! זוהי הודעת בדיקה"
+          maxLength: 4096
+        countryCode:
+          type: string
+          description: Country code (default is 972 for Israel)
+          example: "972"
+          default: "972"
+          
+    AutoResponder:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Unique identifier for the auto-responder
+        trigger:
+          oneOf:
+            - type: string
+            - type: object
+          description: Trigger pattern (string or regex)
+        response:
+          type: string
+          description: Response message
+        enabled:
+          type: boolean
+          description: Whether the auto-responder is enabled
+        options:
+          type: object
+          description: Additional options
+          
+    MessageStats:
+      type: object
+      properties:
+        totalMessages:
+          type: integer
+          description: Total number of messages processed
+        sentMessages:
+          type: integer  
+          description: Number of messages sent
+        receivedMessages:
+          type: integer
+          description: Number of messages received
+        autoResponses:
+          type: integer
+          description: Number of auto-responses sent
+          
+paths:
+  /:
+    get:
+      summary: Get API Documentation
+      description: Returns comprehensive API documentation with endpoints and usage examples
+      tags:
+        - Documentation
+      security: []
+      responses:
+        '200':
+          description: API documentation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name:
+                    type: string
+                    example: "WhatsApp API Server"
+                  version:
+                    type: string
+                    example: "1.0.0"
+                  description:
+                    type: string
+                  endpoints:
+                    type: object
+                  quickStart:
+                    type: object
+                    properties:
+                      hebrew:
+                        type: array
+                        items:
+                          type: string
+                      english:
+                        type: array
+                        items:
+                          type: string
+                          
+  /api/health:
+    get:
+      summary: Health Check
+      description: Check API health and system status
+      tags:
+        - System
+      security: []
+      responses:
+        '200':
+          description: System is healthy
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      status:
+                        type: string
+                        example: "healthy"
+                      timestamp:
+                        type: string
+                        format: date-time
+                      environment:
+                        type: string
+                        example: "development"
+                      whatsapp:
+                        $ref: '#/components/schemas/WhatsAppStatus'
+                      uptime:
+                        type: number
+                        description: Server uptime in seconds
+                      memory:
+                        type: object
+                        description: Memory usage information
+                      version:
+                        type: string
+                        description: Application version
+                      node:
+                        type: string
+                        description: Node.js version
+        '500':
+          description: Health check failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+                
+  /api/status:
+    get:
+      summary: Get WhatsApp Status
+      description: Get current WhatsApp connection status and client information
+      tags:
+        - WhatsApp Connection
+      security: []
+      responses:
+        '200':
+          description: WhatsApp status information
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      status:
+                        allOf:
+                          - $ref: '#/components/schemas/WhatsAppStatus'
+                          - type: object
+                            properties:
+                              lastUpdate:
+                                type: string
+                                format: date-time
+        '500':
+          description: Failed to get status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+                
+  /api/connect:
+    post:
+      summary: Connect to WhatsApp
+      description: Initialize WhatsApp connection and start authentication process
+      tags:
+        - WhatsApp Connection
+      responses:
+        '200':
+          description: Connection initiated successfully
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      nextSteps:
+                        type: array
+                        items:
+                          type: string
+                        description: Next steps to complete setup
+        '500':
+          description: Failed to connect
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+                
+  /api/disconnect:
+    post:
+      summary: Disconnect from WhatsApp
+      description: Disconnect from WhatsApp and cleanup resources
+      tags:
+        - WhatsApp Connection
+      responses:
+        '200':
+          description: Disconnected successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '500':
+          description: Failed to disconnect
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+                
+  /api/qr:
+    get:
+      summary: Get QR Code
+      description: Get QR code for WhatsApp authentication
+      tags:
+        - WhatsApp Connection  
+      security: []
+      responses:
+        '200':
+          description: QR code information
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      qrCode:
+                        type: string
+                        nullable: true
+                        description: Base64 encoded QR code image
+        '400':
+          description: WhatsApp service not initialized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Failed to get QR code
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+                
+  /api/send:
+    post:
+      summary: Send Message
+      description: Send a text message to a WhatsApp number
+      tags:
+        - Messaging
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendMessageRequest'
+            examples:
+              hebrew_message:
+                summary: Hebrew message example
+                value:
+                  phoneNumber: "0501234567"
+                  message: "שלום! איך השלום?"
+                  countryCode: "972"
+              english_message:
+                summary: English message example  
+                value:
+                  phoneNumber: "0501234567"
+                  message: "Hello! How are you?"
+                  countryCode: "972"
+      responses:
+        '200':
+          description: Message sent successfully
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      messageId:
+                        type: string
+                        description: Unique message identifier
+                      chatId:
+                        type: string
+                        description: Chat identifier
+        '400':
+          description: Invalid request or WhatsApp not ready
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ErrorResponse'
+                  - type: object
+                    properties:
+                      errors:
+                        type: array
+                        items:
+                          type: string
+                        description: Validation errors
+                      help:
+                        type: string
+                        description: Help message
+        '500':
+          description: Failed to send message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+                
+  /api/send-media:
+    post:
+      summary: Send Media Message
+      description: Send a media message (images, documents, etc.)
+      tags:
+        - Messaging
+      responses:
+        '501':
+          description: Not implemented yet
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+                
+  /api/messages:
+    get:
+      summary: Get Messages
+      description: Get recent messages with optional limit
+      tags:
+        - Messaging
+      parameters:
+        - name: limit
+          in: query
+          description: Maximum number of messages to return
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 1000
+      responses:
+        '200':
+          description: List of recent messages
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      count:
+                        type: integer
+                        description: Number of messages returned
+                      messages:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id:
+                              type: string
+                            from:
+                              type: string
+                            body:
+                              type: string
+                            timestamp:
+                              type: string
+                              format: date-time
+        '400':
+          description: Message handler not initialized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Failed to get messages
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+                
+  /api/messages/stats:
+    get:
+      summary: Get Message Statistics
+      description: Get message processing statistics
+      tags:
+        - Messaging
+      responses:
+        '200':
+          description: Message statistics
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      stats:
+                        $ref: '#/components/schemas/MessageStats'
+        '400':
+          description: Message handler not initialized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Failed to get statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+                
+  /api/auto-responders:
+    get:
+      summary: Get Auto-Responders
+      description: Get list of all auto-responders
+      tags:
+        - Auto-Responders
+      responses:
+        '200':
+          description: List of auto-responders
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      count:
+                        type: integer
+                      autoResponders:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AutoResponder'
+        '400':
+          description: Message handler not initialized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Failed to get auto-responders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+                
+    post:
+      summary: Add Auto-Responder
+      description: Add a new auto-responder rule
+      tags:
+        - Auto-Responders
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - trigger
+                - response
+              properties:
+                trigger:
+                  oneOf:
+                    - type: string
+                    - type: string
+                      pattern: '^\/.*\/[gimuy]*$'
+                  description: Trigger text or regex pattern (e.g., "/hello/i" for case-insensitive regex)
+                  example: "שלום"
+                response:
+                  type: string
+                  description: Response message
+                  example: "שלום! איך אני יכול לעזור?"
+                options:
+                  type: object
+                  description: Additional options
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: true
+                    id:
+                      type: string
+                      description: Custom ID for the responder
+            examples:
+              hebrew_responder:
+                summary: Hebrew auto-responder
+                value:
+                  trigger: "שלום"
+                  response: "שלום! איך אני יכול לעזור לך?"
+                  options:
+                    enabled: true
+              regex_responder:
+                summary: Regex auto-responder
+                value:
+                  trigger: "/^(hello|hi|hey)$/i"
+                  response: "Hello! How can I help you?"
+                  options:
+                    enabled: true
+      responses:
+        '200':
+          description: Auto-responder added successfully
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      responderId:
+                        type: string
+                        description: ID of the created auto-responder
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Failed to add auto-responder
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+                
+  /api/auto-responders/{id}:
+    delete:
+      summary: Remove Auto-Responder
+      description: Remove an auto-responder by ID
+      tags:
+        - Auto-Responders
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Auto-responder ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Auto-responder removed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '404':
+          description: Auto-responder not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Failed to remove auto-responder
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+                
+  /api/auto-responders/{id}/toggle:
+    put:
+      summary: Toggle Auto-Responder
+      description: Enable or disable an auto-responder
+      tags:
+        - Auto-Responders
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Auto-responder ID
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - enabled
+              properties:
+                enabled:
+                  type: boolean
+                  description: Whether to enable or disable the auto-responder
+      responses:
+        '200':
+          description: Auto-responder toggled successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Auto-responder not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Failed to toggle auto-responder
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+                
+  /api/check-number:
+    post:
+      summary: Check Phone Number
+      description: Check if a phone number is registered on WhatsApp
+      tags:
+        - Utilities
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - phoneNumber
+              properties:
+                phoneNumber:
+                  type: string
+                  description: Phone number to check
+                  example: "0501234567"
+                countryCode:
+                  type: string
+                  description: Country code
+                  example: "972"
+                  default: "972"
+      responses:
+        '200':
+          description: Phone number check result
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      phoneNumber:
+                        type: string
+                      isRegistered:
+                        type: boolean
+                        description: Whether the number is registered on WhatsApp
+                      countryCode:
+                        type: string
+        '400':
+          description: Invalid request or WhatsApp not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Failed to check phone number
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+                
+  /api/client-info:
+    get:
+      summary: Get Client Information
+      description: Get information about the connected WhatsApp client
+      tags:
+        - Utilities
+      responses:
+        '200':
+          description: Client information
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      clientInfo:
+                        type: object
+                        properties:
+                          number:
+                            type: string
+                            description: WhatsApp number
+                          name:
+                            type: string
+                            description: Profile name
+                          profilePicUrl:
+                            type: string
+                            nullable: true
+                            description: Profile picture URL
+        '400':
+          description: WhatsApp service not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Failed to get client information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+                
+  /api/webhook:
+    post:
+      summary: Handle Webhook
+      description: Process incoming webhook requests to send messages
+      tags:
+        - Webhooks
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - phoneNumber
+                - message
+              properties:
+                phoneNumber:
+                  type: string
+                  description: Phone number to send message to
+                message:
+                  type: string
+                  description: Message content
+                countryCode:
+                  type: string
+                  description: Country code
+                  default: "972"
+                webhook_token:
+                  type: string
+                  description: Webhook authentication token (optional)
+      responses:
+        '200':
+          description: Webhook processed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '400':
+          description: Invalid request or WhatsApp not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Webhook processing failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+                
+  /api/chats:
+    get:
+      summary: Get Chats
+      description: Get a list of all WhatsApp chats
+      tags:
+        - Messaging
+      responses:
+        '200':
+          description: List of chats
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  chats:
+                    type: array
+                    items:
+                      type: object
+        '500':
+          description: Failed to get chats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/chats/{chatId}/messages:
+    get:
+      summary: Get Chat Messages
+      description: Get messages for a specific chat by chatId
+      tags:
+        - Messaging
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          description: Chat ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of messages for the chat
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  messages:
+                    type: array
+                    items:
+                      type: object
+        '400':
+          description: Chat ID is required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Failed to get chat messages
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/messages/unprocessed:
+    get:
+      summary: Get Unprocessed Messages
+      description: Get all messages that have not been processed yet
+      tags:
+        - Messaging
+      responses:
+        '200':
+          description: List of unprocessed messages
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  messages:
+                    type: array
+                    items:
+                      type: object
+        '500':
+          description: Failed to get unprocessed messages
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+                
+  /api/messages/reply:
+    post:
+      summary: Reply to a Message
+      description: Reply to a specific WhatsApp message by messageId
+      tags:
+        - Messaging
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - messageId
+                - reply
+              properties:
+                messageId:
+                  type: string
+                  description: The ID of the message to reply to
+                reply:
+                  type: string
+                  description: The reply text
+            examples:
+              example:
+                summary: Example reply
+                value:
+                  messageId: "ABCD1234"
+                  reply: "תודה על ההודעה!"
+      responses:
+        '200':
+          description: Reply sent successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  message:
+                    type: string
+                  hebrew:
+                    type: object
+                    properties:
+                      status:
+                        type: string
+        '400':
+          description: Invalid request or WhatsApp not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Failed to send reply
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+                
+tags:
+  - name: Documentation
+    description: API documentation and information
+  - name: System
+    description: System health and status endpoints
+  - name: WhatsApp Connection
+    description: WhatsApp connection management
+  - name: Messaging
+    description: Message sending and retrieval
+  - name: Auto-Responders
+    description: Automated response management
+  - name: Utilities
+    description: Utility functions and helpers
+  - name: Webhooks
+    description: Webhook processing
