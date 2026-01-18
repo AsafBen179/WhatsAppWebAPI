@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp QR Code Scanner</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            background: linear-gradient(135deg, #25D366 0%, #128C7E 100%);
+            color: white;
+        }
+        .container {
+            background: white;
+            padding: 40px;
+            border-radius: 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+            text-align: center;
+            color: #333;
+        }
+        h1 { margin: 0 0 20px 0; color: #25D366; }
+        #qrCode {
+            width: 300px;
+            height: 300px;
+            border: 4px solid #25D366;
+            border-radius: 10px;
+            margin: 20px 0;
+        }
+        .status {
+            padding: 10px 20px;
+            border-radius: 20px;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+        .connecting { background: #ffc107; color: #333; }
+        .ready { background: #28a745; color: white; }
+        .error { background: #dc3545; color: white; }
+        .instructions {
+            font-size: 14px;
+            color: #666;
+            max-width: 300px;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>WhatsApp Connection</h1>
+        <div id="status" class="status connecting">Checking status...</div>
+        <img id="qrCode" src="" alt="QR Code" style="display: none;">
+        <div id="readyMsg" style="display: none;">
+            <h2 style="color: #25D366;">Connected!</h2>
+            <p>WhatsApp is ready to send messages.</p>
+        </div>
+        <div class="instructions">
+            <p>1. Open WhatsApp on your phone</p>
+            <p>2. Go to Settings > Linked Devices</p>
+            <p>3. Tap "Link a Device"</p>
+            <p>4. Scan this QR code</p>
+        </div>
+    </div>
+    <script>
+        async function checkStatus() {
+            try {
+                const res = await fetch('/api/status');
+                const data = await res.json();
+                const statusEl = document.getElementById('status');
+                const qrEl = document.getElementById('qrCode');
+                const readyEl = document.getElementById('readyMsg');
+
+                if (data.status?.isReady) {
+                    statusEl.textContent = 'Connected & Ready';
+                    statusEl.className = 'status ready';
+                    qrEl.style.display = 'none';
+                    readyEl.style.display = 'block';
+                } else if (data.status?.hasQrCode) {
+                    statusEl.textContent = 'Scan QR Code';
+                    statusEl.className = 'status connecting';
+                    const qrRes = await fetch('/api/qr');
+                    const qrData = await qrRes.json();
+                    if (qrData.qrCode) {
+                        qrEl.src = qrData.qrCode;
+                        qrEl.style.display = 'block';
+                    }
+                    readyEl.style.display = 'none';
+                } else {
+                    statusEl.textContent = 'Initializing...';
+                    statusEl.className = 'status connecting';
+                }
+            } catch (e) {
+                document.getElementById('status').textContent = 'Connection Error';
+                document.getElementById('status').className = 'status error';
+            }
+        }
+        checkStatus();
+        setInterval(checkStatus, 3000);
+    </script>
+</body>
+</html>

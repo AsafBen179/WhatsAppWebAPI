@@ -2,9 +2,10 @@ const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
 
-const dbDir = path.resolve(__dirname, 'data');
+// Use DATA_PATH env var for Docker, fallback to local data folder
+const dbDir = process.env.DATA_PATH || path.resolve(__dirname, 'data');
 if (!fs.existsSync(dbDir)) {
-    fs.mkdirSync(dbDir);
+    fs.mkdirSync(dbDir, { recursive: true });
 }
 
 const db = new Database(path.join(dbDir, 'whatsapp.db'));

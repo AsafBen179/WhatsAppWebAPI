@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  whatsapp-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: whatsapp-api
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      # Persist WhatsApp sessions (keeps you logged in)
+      - whatsapp-sessions:/app/sessions
+      # Persist SQLite database
+      - whatsapp-data:/app/data
+      # Persist logs
+      - whatsapp-logs:/app/logs
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - AUTO_CONNECT=true
+      - SESSION_PATH=/app/sessions
+      - DATA_PATH=/app/data
+      # Uncomment and set your API key for production
+      # - API_KEY=your-secure-api-key-here
+      # Uncomment to set webhook URL
+      # - WEBHOOK_URL=http://host.docker.internal:3001/webhook/whatsapp
+    # Required for Puppeteer/Chrome
+    shm_size: '1gb'
+    # Security settings for Chrome
+    security_opt:
+      - seccomp:unconfined
+    # Add extra hosts for webhook to localhost
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/api/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  whatsapp-sessions:
+    name: whatsapp-sessions
+  whatsapp-data:
+    name: whatsapp-data
+  whatsapp-logs:
+    name: whatsapp-logs

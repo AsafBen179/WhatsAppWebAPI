@@ -1,0 +1,48 @@
+# Dependencies
+node_modules/
+
+# Sessions (will be mounted as volume)
+sessions/
+
+# Logs
+logs/
+*.log
+
+# Data
+data/
+*.db
+
+# Git
+.git/
+.gitignore
+
+# PM2 files (deprecated)
+*.bat
+ecosystem.config.js
+
+# IDE
+.vscode/
+.idea/
+
+# Temp files
+tmp*/
+.wwebjs_cache/
+.wwebjs_auth/
+
+# Documentation build
+docs/
+
+# Environment (use docker-compose environment instead)
+.env
+.env.local
+.env.*.local
+
+# Test files
+test-*.js
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Claude temp directories
+tmpclaude-*/

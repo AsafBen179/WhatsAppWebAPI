@@ -52,6 +52,9 @@ class WhatsAppAPIServer {
         this.app.use(express.json({ limit: '10mb' }));
         this.app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
+        // Serve static files from public directory
+        this.app.use(express.static(path.join(__dirname, 'public')));
+
         // Request logging
         this.app.use(logger.addRequestId);
         this.app.use(logger.httpLogger);
@@ -110,6 +113,7 @@ class WhatsAppAPIServer {
 
         // Message endpoints
         this.app.post('/api/send', this.sendMessage.bind(this));
+        this.app.post('/api/send-to-chat', this.sendToChat.bind(this));
         this.app.post('/api/send-media', this.sendMediaMessage.bind(this));
         this.app.get('/api/messages', this.getMessages.bind(this));
         this.app.get('/api/messages/stats', this.getMessageStats.bind(this));
@@ -117,6 +121,7 @@ class WhatsAppAPIServer {
         this.app.post('/api/messages/reply', this.replyToMessage.bind(this));
         // Chat endpoints
         this.app.get('/api/chats', this.getChats.bind(this));
+        this.app.get('/api/chats/:chatId/info', this.getChatInfo.bind(this));
         this.app.get('/api/chats/:chatId/messages', this.getChatMessages.bind(this));
 
         // Auto-responder endpoints
@@ -246,7 +251,7 @@ class WhatsAppAPIServer {
         const documentation = {
             name: 'WhatsApp API Server',
             version: require('./package.json').version,
-            description: 'REST API for WhatsApp automation using whatsapp-web.js with PM2 support',
+            description: 'REST API for WhatsApp automation using whatsapp-web.js with Docker support',
             baseUrl: baseUrl,
             environment: process.env.NODE_ENV,
             documentation: {
@@ -433,11 +438,12 @@ class WhatsAppAPIServer {
                 logger.info('Initializing WhatsApp service...');
                 this.whatsappService = new WhatsAppService();
                 this.messageHandler = new MessageHandler(this.whatsappService);
-                
+
                 // Add default auto-responders
                 this.setupDefaultAutoResponders();
             }
 
+            // start() will handle destroying existing browser if needed
             await this.whatsappService.start();
 
             res.json({
@@ -551,15 +557,97 @@ class WhatsAppAPIServer {
         }
     }
 
-    // Send a media message (placeholder)
-    async sendMediaMessage(req, res) {
-        res.status(501).json({
-            success: false,
-            error: 'Media messages not implemented yet',
-            hebrew: {
-                error: 'שליחת מדיה עדיין לא מיושמת'
+    // Send message to a chat (group or individual) by chat ID
+    async sendToChat(req, res) {
+        try {
+            const { chatId, message } = req.body;
+
+            if (!chatId || !message) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Chat ID and message are required'
+                });
             }
-        });
+
+            if (!this.whatsappService || !this.whatsappService.isReady) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'WhatsApp service not ready. Please connect first.'
+                });
+            }
+
+            const result = await this.whatsappService.sendToChat(chatId, message);
+
+            if (result.success) {
+                logger.info(`Message sent successfully to chat ${chatId}`);
+                res.json(result);
+            } else {
+                res.status(400).json(result);
+            }
+        } catch (error) {
+            logger.apiError(error, req);
+            res.status(500).json({
+                success: false,
+                error: 'Failed to send message to chat'
+            });
+        }
+    }
+
+    // Send a media message (image, video, document)
+    async sendMediaMessage(req, res) {
+        try {
+            const { chatId, phoneNumber, mediaBase64, mimetype, filename, caption } = req.body;
+
+            // Determine target (chatId or phoneNumber)
+            const target = chatId || (phoneNumber ? `${phoneNumber}@c.us` : null);
+
+            if (!target) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Either chatId or phoneNumber is required'
+                });
+            }
+
+            if (!mediaBase64 || !mimetype) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'mediaBase64 and mimetype are required'
+                });
+            }
+
+            if (!this.whatsappService || !this.whatsappService.isReady) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'WhatsApp service not ready. Please connect first.'
+                });
+            }
+
+            const result = await this.whatsappService.sendMedia(
+                target,
+                mediaBase64,
+                mimetype,
+                filename || 'media',
+                caption || ''
+            );
+
+            if (result.success) {
+                logger.info(`Media sent successfully to ${target}`);
+                res.json({
+                    ...result,
+                    hebrew: {
+                        status: 'נשלח בהצלחה'
+                    }
+                });
+            } else {
+                res.status(400).json(result);
+            }
+        } catch (error) {
+            logger.apiError(error, req);
+            res.status(500).json({
+                success: false,
+                error: 'Failed to send media: ' + error.message
+            });
+        }
     }
 
     //Get Chats
@@ -567,6 +655,28 @@ class WhatsAppAPIServer {
         try {
             const chats = await this.whatsappService.getChats();
             res.json({ success: true, chats });
+        } catch (err) {
+            res.status(500).json({ success: false, error: err.message });
+        }
+    }
+
+    //Get Chat info by ID
+    async getChatInfo(req, res) {
+        try {
+            const { chatId } = req.params;
+            if (!chatId) {
+                return res.status(400).json({ success: false, error: 'Chat ID is required' });
+            }
+
+            if (!this.whatsappService || !this.whatsappService.isReady) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'WhatsApp service not ready'
+                });
+            }
+
+            const chatInfo = await this.whatsappService.getChatInfo(chatId);
+            res.json({ success: true, ...chatInfo });
         } catch (err) {
             res.status(500).json({ success: false, error: err.message });
         }
@@ -1035,9 +1145,8 @@ class WhatsAppAPIServer {
         // Handle uncaught exceptions
         process.on('uncaughtException', (error) => {
             logger.error('Uncaught Exception:', error);
-            if (!process.env.PM2_USAGE) {
-                process.exit(1);
-            }
+            // Exit and let Docker restart policy handle the restart
+            process.exit(1);
         });
 
         // Graceful shutdown signals
