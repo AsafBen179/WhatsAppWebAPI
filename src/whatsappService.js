@@ -17,10 +17,59 @@ class WhatsAppService {
         this.initializeClient();
     }
 
+    cleanupStaleLocks(sessionDir) {
+        const fs = require('fs');
+        const lockFiles = [
+            'lockfile',
+            'DevToolsActivePort',
+            'SingletonLock',
+            'SingletonSocket',
+            'SingletonCookie'
+        ];
+
+        try {
+            for (const lockFile of lockFiles) {
+                const lockPath = path.join(sessionDir, lockFile);
+                if (fs.existsSync(lockPath)) {
+                    fs.unlinkSync(lockPath);
+                    logger.info(`Removed stale lock file: ${lockFile}`);
+                }
+            }
+        } catch (error) {
+            logger.warn('Could not clean up some lock files:', error.message);
+        }
+    }
+
     initializeClient() {
         try {
             const sessionPath = process.env.SESSION_PATH || './sessions';
-            
+            const clientSessionDir = path.resolve(sessionPath, 'session-whatsapp-api-client');
+
+            // Clean up stale lock files from previous crashes or restarts
+            this.cleanupStaleLocks(clientSessionDir);
+
+            // Find Chrome executable - check environment variables first (Docker), then common locations
+            const fs = require('fs');
+            const chromePaths = [
+                process.env.PUPPETEER_EXECUTABLE_PATH,  // Docker environment
+                process.env.CHROME_PATH,
+                '/usr/bin/chromium',                     // Linux/Docker
+                '/usr/bin/chromium-browser',             // Linux alternative
+                '/usr/bin/google-chrome',                // Linux Chrome
+                'C:/Users/asaf1/.cache/puppeteer/chrome/win64-143.0.7499.192/chrome-win64/chrome.exe',
+                'C:/Program Files/Google/Chrome/Application/chrome.exe',
+                'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe'
+            ].filter(Boolean);
+
+            let executablePath = null;
+            for (const chromePath of chromePaths) {
+                if (fs.existsSync(chromePath)) {
+                    executablePath = chromePath;
+                    logger.info(`Using Chrome/Chromium at: ${chromePath}`);
+                    break;
+                }
+            }
+
             this.client = new Client({
                 authStrategy: new LocalAuth({
                     clientId: "whatsapp-api-client",
@@ -28,14 +77,13 @@ class WhatsAppService {
                 }),
                 puppeteer: {
                     headless: true,
+                    executablePath: executablePath,
                     args: [
                         '--no-sandbox',
                         '--disable-setuid-sandbox',
                         '--disable-dev-shm-usage',
                         '--disable-accelerated-2d-canvas',
                         '--no-first-run',
-                        '--no-zygote',
-                        '--single-process',
                         '--disable-gpu'
                     ]
                 }
@@ -113,13 +161,33 @@ class WhatsAppService {
 
     async start() {
         try {
+            // If client already exists and might be running, destroy it first
             if (this.client) {
-                logger.info('Starting WhatsApp client...');
-                await this.client.initialize();
-                logger.info('WhatsApp client initialization completed');
-            } else {
-                throw new Error('Client not initialized');
+                try {
+                    logger.info('Destroying existing client before reconnecting...');
+                    await this.client.destroy();
+                } catch (destroyError) {
+                    // Ignore destroy errors - client might not be fully initialized
+                    logger.warn('Could not destroy existing client (may not be running):', destroyError.message);
+                }
+                this.isReady = false;
+                this.connectionStatus = 'disconnected';
+                this.qrCode = null;
+                this.client = null;
+
+                // Clean up lock files in case destroy failed or browser crashed
+                const sessionPath = process.env.SESSION_PATH || './sessions';
+                const clientSessionDir = path.resolve(sessionPath, 'session-whatsapp-api-client');
+                this.cleanupStaleLocks(clientSessionDir);
             }
+
+            // Reinitialize the client
+            logger.info('Reinitializing WhatsApp client...');
+            this.initializeClient();
+
+            logger.info('Starting WhatsApp client...');
+            await this.client.initialize();
+            logger.info('WhatsApp client initialization completed');
         } catch (error) {
             logger.error('Failed to start WhatsApp client:', error);
             throw error;
@@ -146,6 +214,34 @@ class WhatsAppService {
             }));
         } catch (error) {
             logger.error('Failed to get chats:', error);
+            throw error;
+        }
+    }
+
+    async getChatInfo(chatId) {
+        try {
+            if (!this.isReady) {
+                throw new Error('WhatsApp client is not ready. Please authenticate first.');
+            }
+
+            const chat = await this.client.getChatById(chatId);
+            if (!chat) {
+                throw new Error(`Chat with ID ${chatId} not found`);
+            }
+
+            return {
+                id: chat.id._serialized,
+                name: chat.name,
+                isGroup: chat.isGroup,
+                unreadCount: chat.unreadCount,
+                timestamp: chat.timestamp,
+                archived: chat.archived,
+                pinned: chat.pinned,
+                isMuted: chat.isMuted,
+                muteExpiration: chat.muteExpiration
+            };
+        } catch (error) {
+            logger.error('Failed to get chat info:', error);
             throw error;
         }
     }
@@ -231,8 +327,28 @@ class WhatsAppService {
                 throw new Error(`Phone number ${phoneNumber} is not registered on WhatsApp`);
             }
 
-            const result = await this.client.sendMessage(numberId._serialized, message);
-            
+            let result;
+            try {
+                result = await this.client.sendMessage(numberId._serialized, message);
+            } catch (sendError) {
+                // Handle known whatsapp-web.js bug: markedUnread error
+                // The message is often delivered even when this error occurs
+                if (sendError.message && sendError.message.includes('markedUnread')) {
+                    logger.warn(`⚠️ markedUnread bug encountered - message likely sent to ${formattedNumber}`);
+                    return {
+                        success: true,
+                        messageId: `pending-${Date.now()}`,
+                        timestamp: Math.floor(Date.now() / 1000),
+                        to: formattedNumber,
+                        originalNumber: phoneNumber,
+                        message: message,
+                        countryCode: countryCode,
+                        note: 'Message likely delivered (markedUnread bug workaround)'
+                    };
+                }
+                throw sendError;
+            }
+
             logger.info(`✅ Message sent successfully to ${formattedNumber}`, {
                 messageId: result.id.id,
                 timestamp: result.timestamp,
@@ -256,6 +372,96 @@ class WhatsAppService {
                 error: error.message,
                 to: phoneNumber,
                 message: message
+            };
+        }
+    }
+
+    async sendToChat(chatId, message) {
+        try {
+            if (!this.isReady) {
+                throw new Error('WhatsApp client is not ready. Please authenticate first.');
+            }
+
+            if (!message || message.trim().length === 0) {
+                throw new Error('Message cannot be empty');
+            }
+
+            let result;
+            try {
+                result = await this.client.sendMessage(chatId, message);
+            } catch (sendError) {
+                // Handle known whatsapp-web.js bug: markedUnread error
+                if (sendError.message && sendError.message.includes('markedUnread')) {
+                    logger.warn(`⚠️ markedUnread bug encountered - message likely sent to chat ${chatId}`);
+                    return {
+                        success: true,
+                        messageId: `pending-${Date.now()}`,
+                        timestamp: Math.floor(Date.now() / 1000),
+                        to: chatId,
+                        message: message,
+                        note: 'Message likely delivered (markedUnread bug workaround)'
+                    };
+                }
+                throw sendError;
+            }
+
+            logger.info(`✅ Message sent successfully to chat ${chatId}`, {
+                messageId: result.id.id,
+                timestamp: result.timestamp
+            });
+
+            return {
+                success: true,
+                messageId: result.id.id,
+                timestamp: result.timestamp,
+                to: chatId,
+                message: message
+            };
+
+        } catch (error) {
+            logger.error('❌ Failed to send message to chat:', error);
+            return {
+                success: false,
+                error: error.message,
+                to: chatId,
+                message: message
+            };
+        }
+    }
+
+    async sendMedia(chatId, mediaBase64, mimetype, filename, caption = '') {
+        try {
+            if (!this.isReady) {
+                throw new Error('WhatsApp client is not ready. Please authenticate first.');
+            }
+
+            // Create MessageMedia from base64
+            const media = new MessageMedia(mimetype, mediaBase64, filename);
+
+            const result = await this.client.sendMessage(chatId, media, {
+                caption: caption
+            });
+
+            logger.info(`✅ Media sent successfully to chat ${chatId}`, {
+                messageId: result.id.id,
+                timestamp: result.timestamp,
+                filename: filename
+            });
+
+            return {
+                success: true,
+                messageId: result.id.id,
+                timestamp: result.timestamp,
+                to: chatId,
+                filename: filename
+            };
+
+        } catch (error) {
+            logger.error('❌ Failed to send media:', error);
+            return {
+                success: false,
+                error: error.message,
+                to: chatId
             };
         }
     }
